@@ -13,3 +13,8 @@ prusa-mcp = "prusa_mcp.server:main"
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"
+
+[dependency-groups]
+dev = [
+    "requests>=2.0",
+]
