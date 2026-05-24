@@ -17,4 +17,79 @@ build-backend = "hatchling.build"
 [dependency-groups]
 dev = [
     "requests>=2.0",
+    "ruff>=0.15.14",
 ]
+
+[tool.ruff]
+line-length = 100
+preview = true
+
+[tool.ruff.format]
+quote-style = "double"
+indent-style = "space"
+
+[tool.ruff.lint]
+select = [
+    "A",     # flake8-builtins — builtin name shadowing
+    "ANN",   # flake8-annotations — type annotation enforcement
+    "ARG",   # flake8-unused-arguments
+    "ASYNC", # flake8-async — blocking calls in async functions
+    "B",     # flake8-bugbear — common bugs and design issues
+    "BLE",   # flake8-blind-except
+    "C4",    # flake8-comprehensions — comprehension optimization
+    "C90",   # mccabe — cyclomatic complexity
+    "COM",   # flake8-commas — trailing commas
+    "D401",  # pydocstyle — imperative mood in first line
+    "D415",  # pydocstyle — period/question-mark/! at end of first line
+    # DOC (pydoclint) skipped — requires Google/NumPy Returns:/Raises: sections
+    "DTZ",   # flake8-datetimez — timezone-aware datetimes
+    "E",     # pycodestyle errors
+    "EM",    # flake8-errmsg — error message assigned to variable before raise
+    "ERA",   # eradicate — commented-out code
+    "F",     # Pyflakes — logical errors
+    "FBT",   # flake8-boolean-trap — boolean positional args
+    "FIX",   # flake8-fixme — FIXME/HACK/XXX comments
+    "FLY",   # flynt — f-string optimization
+    "FURB",  # refurb — code modernization
+    "G",     # flake8-logging-format — no f-strings in log calls
+    "I",     # isort — import sorting
+    "ICN",   # flake8-import-conventions — conventional aliases (np, pd, etc.)
+    "INP",   # flake8-no-pep420 — no implicit namespace packages
+    "ISC",   # flake8-implicit-str-concat
+    "LOG",   # flake8-logging — logging best practices
+    "N",     # pep8-naming — naming conventions
+    "PERF",  # Perflint — performance anti-patterns
+    "PIE",   # flake8-pie — misc improvements
+    "PL",    # Pylint
+    "PTH",   # flake8-use-pathlib — prefer pathlib over os.path
+    "RET",   # flake8-return — return statement cleanup
+    "RSE",   # flake8-raise — unnecessary parens on raised exceptions
+    "RUF",   # Ruff-specific rules
+    "S",     # flake8-bandit — security
+    "SIM",   # flake8-simplify — simplification opportunities
+    "SLF",   # flake8-self — private member access
+    "T10",   # flake8-debugger — pdb/breakpoint left in code
+    "T20",   # flake8-print — print statements
+    "TC",    # flake8-type-checking — move type-only imports to TYPE_CHECKING
+    "TD",    # flake8-todos — TODO comment format enforcement
+    "TID",   # flake8-tidy-imports — tidy imports
+    "TRY",   # tryceratops — exception handling anti-patterns
+    "UP",    # pyupgrade — modern Python syntax
+    "W",     # pycodestyle warnings
+]
+ignore = [
+    # Formatter handles these; enabling alongside ruff format causes conflicts
+    "COM812", # missing trailing comma
+    "ISC001", # single-line implicit string concatenation
+    # S404 fires on every `import subprocess` regardless of actual safety
+    "S404",
+]
+
+[tool.ruff.lint.isort]
+known-first-party = ["prusa_mcp"]
+
+[tool.ruff.lint.mccabe]
+max-complexity = 10
+
+[tool.ruff.lint.per-file-ignores]
+"scripts/**" = ["INP001", "T201"]

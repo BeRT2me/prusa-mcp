@@ -27,8 +27,8 @@ def write_config(path: Path, config: dict[str, str]) -> None:
 
 def _parse_config(content: str) -> dict[str, str]:
     result = {}
-    for line in content.splitlines():
-        line = line.strip()
+    for raw in content.splitlines():
+        line = raw.strip()
         if not line.startswith(";"):
             continue
         line = line[1:].strip()

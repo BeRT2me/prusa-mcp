@@ -20,6 +20,7 @@ Re-run after updating PrusaSlicer to keep the schema current.
 """
 
 import argparse
+import contextlib
 import json
 import re
 import sys
@@ -61,11 +62,24 @@ _MODE_MAP = {
 # Base retract keys that PrusaSlicer dynamically generates as nullable
 # filament_* overrides via a loop at the end of PrintConfigDef::PrintConfigDef()
 _FILAMENT_RETRACT_BASES = [
-    "retract_length", "retract_lift", "retract_lift_above", "retract_lift_below",
-    "retract_speed", "travel_max_lift", "deretract_speed", "retract_restart_extra",
-    "retract_before_travel", "retract_length_toolchange", "retract_restart_extra_toolchange",
-    "retract_layer_change", "wipe", "travel_lift_before_obstacle", "travel_ramping_lift",
-    "retract_before_wipe", "travel_slope", "seam_gap_distance",
+    "retract_length",
+    "retract_lift",
+    "retract_lift_above",
+    "retract_lift_below",
+    "retract_speed",
+    "travel_max_lift",
+    "deretract_speed",
+    "retract_restart_extra",
+    "retract_before_travel",
+    "retract_length_toolchange",
+    "retract_restart_extra_toolchange",
+    "retract_layer_change",
+    "wipe",
+    "travel_lift_before_obstacle",
+    "travel_ramping_lift",
+    "retract_before_wipe",
+    "travel_slope",
+    "seam_gap_distance",
 ]
 
 
@@ -73,9 +87,7 @@ def _fetch_ref(ref: str | None) -> str:
     """Resolve ref to a concrete git ref, defaulting to the latest release tag."""
     if ref:
         return ref
-    resp = requests.get(
-        f"https://api.github.com/repos/{_REPO}/releases/latest", timeout=10
-    )
+    resp = requests.get(f"https://api.github.com/repos/{_REPO}/releases/latest", timeout=10)
     resp.raise_for_status()
     tag = resp.json()["tag_name"]
     print(f"Latest release: {tag}")
@@ -103,16 +115,15 @@ def _collect_until(lines: list[str], start: int, end: str) -> tuple[str, int]:
 def _extract_strings(s: str) -> list[str]:
     """Pull all double-quoted string contents from a C++ expression."""
     return [
-        p.replace("\\n", "\n").replace('\\"', '"')
-        for p in re.findall(r'"((?:[^"\\]|\\.)*)"', s)
+        p.replace("\\n", "\n").replace('\\"', '"') for p in re.findall(r'"((?:[^"\\]|\\.)*)"', s)
     ]
 
 
 def _parse_enum_block(block: str) -> tuple[list[str], list[str]]:
-    """
-    Parse an enum block into (values, labels).
-    Handles both plain lists  "a", "b", "c"
-    and paired lists           { "a", L("A") }, { "b", L("B") }
+    """Parse an enum block into (values, labels).
+
+    Handles both plain lists ``"a", "b", "c"``
+    and paired lists ``{ "a", L("A") }, { "b", L("B") }``.
     """
     strings = _extract_strings(block)
     # Pairs are indicated by inner braces: { "val", "label" }
@@ -122,6 +133,38 @@ def _parse_enum_block(block: str) -> tuple[list[str], list[str]]:
         labels = strings[1::2]
         return values, labels
     return strings, []
+
+
+def _apply_field_assignment(field: str, rest: str, current: dict) -> None:
+    match field:
+        case "label" | "full_label" | "tooltip" | "sidetext" | "category" | "ratio_over":
+            v = "".join(_extract_strings(rest))
+            if v:
+                current[field] = v
+        case "min" | "max":
+            with contextlib.suppress(ValueError):
+                current[field] = float(rest)
+        case "mode":
+            current["mode"] = _MODE_MAP.get(rest, rest)
+
+
+def _synthesize_filament_overrides(options: dict[str, dict]) -> None:
+    # filament_retract_* options are generated dynamically in PrintConfig — not literally
+    # written as add("filament_retract_speed", ...) — so we synthesise them post-parse.
+    # nil = "use printer default for the base retract key".
+    for base_key in _FILAMENT_RETRACT_BASES:
+        if base_key not in options:
+            continue
+        base = options[base_key]
+        filament_key = f"filament_{base_key}"
+        if filament_key in options:
+            continue
+        entry: dict = {"type": base["type"], "nullable": True}
+        for field in ("label", "full_label", "tooltip", "sidetext", "category", "mode"):
+            if field in base:
+                entry[field] = base[field]
+        entry["nil_means"] = f"Inherit printer default ({base_key})"
+        options[filament_key] = entry
 
 
 def parse(text: str) -> dict[str, dict]:
@@ -134,9 +177,7 @@ def parse(text: str) -> dict[str, dict]:
         line = lines[i].strip()
 
         # New option definition
-        m = re.match(
-            r"def\s*=\s*this->add(_nullable)?\s*\(\s*\"([^\"]+)\"\s*,\s*(\w+)\s*\)", line
-        )
+        m = re.match(r"def\s*=\s*this->add(_nullable)?\s*\(\s*\"([^\"]+)\"\s*,\s*(\w+)\s*\)", line)
         if m:
             current = {
                 "type": _TYPE_MAP.get(m.group(3), m.group(3)),
@@ -156,20 +197,7 @@ def parse(text: str) -> dict[str, dict]:
             field = m.group(1)
             text_block, i = _collect_until(lines, i, ";")
             rest = text_block.split("=", 1)[1].strip().rstrip(";").strip()
-
-            match field:
-                case "label" | "full_label" | "tooltip" | "sidetext" | "category" | "ratio_over":
-                    v = "".join(_extract_strings(rest))
-                    if v:
-                        current[field] = v
-                case "min" | "max":
-                    try:
-                        current[field] = float(rest)
-                    except ValueError:
-                        pass
-                case "mode":
-                    current["mode"] = _MODE_MAP.get(rest, rest)
-
+            _apply_field_assignment(field, rest, current)
             i += 1
             continue
 
@@ -191,22 +219,7 @@ def parse(text: str) -> dict[str, dict]:
 
         i += 1
 
-    # Synthesise filament_* nullable overrides that PrintConfig generates dynamically.
-    # Each is a nullable copy of its base retract option, meaning nil = "use printer default".
-    for base_key in _FILAMENT_RETRACT_BASES:
-        if base_key not in options:
-            continue
-        base = options[base_key]
-        filament_key = f"filament_{base_key}"
-        if filament_key in options:
-            continue  # already parsed (shouldn't happen, but be safe)
-        entry: dict = {"type": base["type"], "nullable": True}
-        for field in ("label", "full_label", "tooltip", "sidetext", "category", "mode"):
-            if field in base:
-                entry[field] = base[field]
-        entry["nil_means"] = f"Inherit printer default ({base_key})"
-        options[filament_key] = entry
-
+    _synthesize_filament_overrides(options)
     return options
 
 
@@ -236,8 +249,8 @@ def parse_help_urls(text: str) -> dict[str, str]:
     variables: dict[str, str] = {}
     urls: dict[str, str] = {}
 
-    for line in text.splitlines():
-        line = line.strip()
+    for raw in text.splitlines():
+        line = raw.strip()
 
         # String variable assignment:  [std::string] name = "value";
         if m := re.match(r"(?:std::string\s+)?(\w+)\s*=\s*(.+?)\s*;$", line):
@@ -281,7 +294,11 @@ def main() -> None:
             sys.exit(1)
         print_config_text = cpp_path.read_text(encoding="utf-8", errors="replace")
         tab_cpp_path = cpp_path.parent.parent / "slic3r/GUI/Tab.cpp"
-        tab_cpp_text = tab_cpp_path.read_text(encoding="utf-8", errors="replace") if tab_cpp_path.exists() else None
+        tab_cpp_text = (
+            tab_cpp_path.read_text(encoding="utf-8", errors="replace")
+            if tab_cpp_path.exists()
+            else None
+        )
         if tab_cpp_text is None:
             print(f"Tab.cpp not found at {tab_cpp_path}, skipping help URLs", file=sys.stderr)
     else:
