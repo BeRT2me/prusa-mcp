@@ -1,0 +1,15 @@
+[project]
+name = "prusa-mcp"
+version = "0.1.0"
+requires-python = ">=3.11"
+dependencies = [
+    "mcp[cli]>=1.0",
+    "pydantic>=2.0",
+]
+
+[project.scripts]
+prusa-mcp = "prusa_mcp.server:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"

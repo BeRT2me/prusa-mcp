@@ -1,0 +1,17 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+.venv/
+
+# uv
+.uv/
+
+# Build
+dist/
+*.egg-info/
+
+# Editor
+.vscode/
+.idea/
+*.swp
