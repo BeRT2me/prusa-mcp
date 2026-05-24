@@ -121,18 +121,24 @@ async def slice_model(output_path: str | None = None) -> str:
 def open_in_gui() -> str:
     """Reopen the active project in PrusaSlicer GUI for visual review."""
     _project.require()
-    match platform.system():
-        case "Windows":
-            os.startfile(str(_project.path))  # noqa: S606
-        case _:  # Linux / macOS / WSL
-            if _is_wsl():
-                win_path = subprocess.check_output(  # noqa: S603
-                    ["wslpath", "-w", str(_project.path)],  # noqa: S607
-                    text=True,
-                ).strip()
-                subprocess.Popen(["cmd.exe", "/c", "start", "", win_path])  # noqa: S603, S607
-            else:
-                subprocess.Popen(["xdg-open", str(_project.path)])  # noqa: S603, S607
+    gui = _gui_path()
+    if gui is not None:
+        # --single-instance forwards the file to an already-open PrusaSlicer window
+        # instead of spawning a new process each time.
+        subprocess.Popen([str(gui), "--single-instance", str(_project.path)])  # noqa: S603
+    else:
+        match platform.system():
+            case "Windows":
+                os.startfile(str(_project.path))  # noqa: S606
+            case _:  # Linux / macOS / WSL
+                if _is_wsl():
+                    win_path = subprocess.check_output(  # noqa: S603
+                        ["wslpath", "-w", str(_project.path)],  # noqa: S607
+                        text=True,
+                    ).strip()
+                    subprocess.Popen(["cmd.exe", "/c", "start", "", win_path])  # noqa: S603, S607
+                else:
+                    subprocess.Popen(["xdg-open", str(_project.path)])  # noqa: S603, S607
     return f"Opened {_project.path.name} in GUI"  # type: ignore[union-attr]
 
 
@@ -259,6 +265,19 @@ _WIN_PRUSA_PATHS_NATIVE = [
     Path("C:/Program Files/Prusa3D/PrusaSlicer/prusa-slicer.exe"),
     Path("C:/Program Files (x86)/Prusa3D/PrusaSlicer/prusa-slicer.exe"),
 ]
+
+
+def _gui_path() -> Path | None:
+    """Return the PrusaSlicer GUI binary path, or None if not found."""
+    if platform.system() == "Windows":
+        for p in _WIN_PRUSA_PATHS_NATIVE:
+            if p.exists():
+                return p
+    elif _is_wsl():
+        for p in _WIN_PRUSA_PATHS:
+            if p.exists():
+                return p
+    return None
 
 
 def _cli_path() -> Path:
