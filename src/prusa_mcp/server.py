@@ -119,7 +119,12 @@ async def slice_model(output_path: str | None = None) -> str:
 
 @mcp.tool()
 def open_in_gui() -> str:
-    """Reopen the active project in PrusaSlicer GUI for visual review."""
+    """Reopen the active project in PrusaSlicer GUI for visual review.
+
+    Expects PrusaSlicer to already be running with the model open.
+    When the dialog appears, the user should choose "Import config only"
+    to apply Claude's setting changes without disturbing the current model view.
+    """
     _project.require()
     gui = _gui_path()
     if gui is not None:
