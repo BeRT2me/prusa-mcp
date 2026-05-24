@@ -30,11 +30,15 @@ uv sync
 
 ## Claude Desktop Setup
 
+The MCP server must run on the same machine as PrusaSlicer so it can read/write `.3mf` files and open the GUI.
+
 Add to your `claude_desktop_config.json`:
 
 **macOS:** `~/Library/Application Support/Claude/claude_desktop_config.json`  
-**Windows:** `%APPDATA%\Claude\claude_desktop_config.json`  
+**Windows (native):** `%APPDATA%\Claude\claude_desktop_config.json`  
 **Linux:** `~/.config/claude-desktop/claude_desktop_config.json`
+
+### macOS / Linux
 
 ```json
 {
@@ -47,7 +51,27 @@ Add to your `claude_desktop_config.json`:
 }
 ```
 
-Replace `/path/to/prusa-mcp` with the actual clone path. Restart Claude Desktop after saving.
+### Windows via WSL
+
+Clone the repo inside WSL, then point Claude Desktop (running on Windows) at it:
+
+```json
+{
+  "mcpServers": {
+    "prusa-slicer": {
+      "command": "wsl",
+      "args": ["--exec", "/home/<user>/.local/bin/uv", "run", "--directory", "/home/<user>/prusa-mcp", "prusa-mcp"]
+    }
+  }
+}
+```
+
+The server auto-detects WSL and:
+- Calls the Windows PrusaSlicer CLI at its standard install path
+- Reads presets from `%APPDATA%\PrusaSlicer`
+- Translates paths when opening `.3mf` files in the GUI
+
+Restart Claude Desktop after saving the config.
 
 ## Tools
 

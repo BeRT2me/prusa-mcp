@@ -1,6 +1,7 @@
 """PrusaSlicer MCP server."""
 
 import base64
+import functools
 import json
 import subprocess
 from dataclasses import dataclass, field
@@ -217,15 +218,54 @@ def _validate(key: str, value: str) -> str | None:
 # --- Other helpers ---
 
 
+@functools.cache
+def _is_wsl() -> bool:
+    try:
+        return "microsoft" in Path("/proc/version").read_text(encoding="utf-8").lower()
+    except OSError:
+        return False
+
+
+@functools.cache
+def _win_appdata() -> Path | None:
+    # Resolve %APPDATA% via cmd.exe and convert to a WSL-accessible path.
+    # Cached — only runs once per server process.
+    try:
+        raw = subprocess.check_output(
+            ["cmd.exe", "/c", "echo %APPDATA%"],  # noqa: S607
+            stderr=subprocess.DEVNULL,
+            text=True,
+        ).strip()
+        wsl = subprocess.check_output(["wslpath", raw], text=True).strip()  # noqa: S603, S607
+        return Path(wsl)
+    except (subprocess.SubprocessError, FileNotFoundError):
+        return None
+
+
+# Typical Windows PrusaSlicer install locations, as WSL paths
+_WIN_PRUSA_PATHS = [
+    Path("/mnt/c/Program Files/Prusa3D/PrusaSlicer/prusa-slicer.exe"),
+    Path("/mnt/c/Program Files (x86)/Prusa3D/PrusaSlicer/prusa-slicer.exe"),
+]
+
+
 def _cli_path() -> Path:
-    # Prefer the locally built binary; fall back to system PATH
+    # Prefer a locally built binary, then Windows install (WSL), then system PATH
     built = Path.home() / "claude-code/PrusaSlicer/build/src/prusa-slicer"
     if built.exists():
         return built
+    if _is_wsl():
+        for p in _WIN_PRUSA_PATHS:
+            if p.exists():
+                return p
     return Path("prusa-slicer")
 
 
 def _datadir() -> Path:
+    if _is_wsl():
+        appdata = _win_appdata()
+        if appdata:
+            return appdata / "PrusaSlicer"
     return Path.home() / ".config/PrusaSlicer"
 
 
