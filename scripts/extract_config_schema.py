@@ -114,9 +114,7 @@ def _collect_until(lines: list[str], start: int, end: str) -> tuple[str, int]:
 
 def _extract_strings(s: str) -> list[str]:
     """Pull all double-quoted string contents from a C++ expression."""
-    return [
-        p.replace("\\n", "\n").replace('\\"', '"') for p in re.findall(r'"((?:[^"\\]|\\.)*)"', s)
-    ]
+    return [p.replace("\\n", "\n").replace('\\"', '"') for p in re.findall(r'"((?:[^"\\]|\\.)*)"', s)]
 
 
 def _parse_enum_block(block: str) -> tuple[list[str], list[str]]:
@@ -260,9 +258,7 @@ def parse_help_urls(text: str) -> dict[str, str]:
 
         # append_single_option_line("key")  — no URL, skip
         # append_single_option_line("key", path_expr)  — has URL
-        if m := re.match(
-            r'optgroup->append_single_option_line\(\s*"([^"]+)"\s*,\s*(.+?)\s*\)\s*;', line
-        ):
+        if m := re.match(r'optgroup->append_single_option_line\(\s*"([^"]+)"\s*,\s*(.+?)\s*\)\s*;', line):
             path_end = _resolve_str_expr(m.group(2), variables)
             if path_end:
                 urls[m.group(1)] = _HELP_BASE + path_end
@@ -295,9 +291,7 @@ def main() -> None:
         print_config_text = cpp_path.read_text(encoding="utf-8", errors="replace")
         tab_cpp_path = cpp_path.parent.parent / "slic3r/GUI/Tab.cpp"
         tab_cpp_text = (
-            tab_cpp_path.read_text(encoding="utf-8", errors="replace")
-            if tab_cpp_path.exists()
-            else None
+            tab_cpp_path.read_text(encoding="utf-8", errors="replace") if tab_cpp_path.exists() else None
         )
         if tab_cpp_text is None:
             print(f"Tab.cpp not found at {tab_cpp_path}, skipping help URLs", file=sys.stderr)

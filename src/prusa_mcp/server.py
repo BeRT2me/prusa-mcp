@@ -73,11 +73,7 @@ def get_config(keys: list[str] | None = None) -> str:
     Each value is annotated with its label, units, valid range, and tooltip.
     """
     _project.require()
-    items = (
-        _project.config
-        if keys is None
-        else {k: _project.config[k] for k in keys if k in _project.config}
-    )
+    items = _project.config if keys is None else {k: _project.config[k] for k in keys if k in _project.config}
     return json.dumps({k: _annotate(k, v) for k, v in items.items()}, indent=2)
 
 
@@ -122,7 +118,14 @@ async def slice_model(output_path: str | None = None) -> str:
 def open_in_gui() -> str:
     """Reopen the active project in PrusaSlicer GUI for visual review."""
     _project.require()
-    subprocess.Popen(["xdg-open", str(_project.path)])  # noqa: S603, S607
+    if _is_wsl():
+        win_path = subprocess.check_output(  # noqa: S603
+            ["wslpath", "-w", str(_project.path)],  # noqa: S607
+            text=True,
+        ).strip()
+        subprocess.Popen(["cmd.exe", "/c", "start", "", win_path])  # noqa: S603, S607
+    else:
+        subprocess.Popen(["xdg-open", str(_project.path)])  # noqa: S603, S607
     return f"Opened {_project.path.name} in GUI"  # type: ignore[union-attr]
 
 
@@ -180,8 +183,7 @@ def _annotate(key: str, value: str) -> dict:
     if "enum_values" in info:
         labels = info.get("enum_labels", info["enum_values"])
         entry["valid_values"] = [
-            f"{v} ({lbl})" if v != lbl else v
-            for v, lbl in zip(info["enum_values"], labels, strict=True)
+            f"{v} ({lbl})" if v != lbl else v for v, lbl in zip(info["enum_values"], labels, strict=True)
         ]
 
     return entry
