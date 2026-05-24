@@ -3,6 +3,8 @@
 import base64
 import functools
 import json
+import os
+import platform
 import subprocess
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -119,14 +121,18 @@ async def slice_model(output_path: str | None = None) -> str:
 def open_in_gui() -> str:
     """Reopen the active project in PrusaSlicer GUI for visual review."""
     _project.require()
-    if _is_wsl():
-        win_path = subprocess.check_output(  # noqa: S603
-            ["wslpath", "-w", str(_project.path)],  # noqa: S607
-            text=True,
-        ).strip()
-        subprocess.Popen(["cmd.exe", "/c", "start", "", win_path])  # noqa: S603, S607
-    else:
-        subprocess.Popen(["xdg-open", str(_project.path)])  # noqa: S603, S607
+    match platform.system():
+        case "Windows":
+            os.startfile(str(_project.path))  # noqa: S606
+        case _:  # Linux / macOS / WSL
+            if _is_wsl():
+                win_path = subprocess.check_output(  # noqa: S603
+                    ["wslpath", "-w", str(_project.path)],  # noqa: S607
+                    text=True,
+                ).strip()
+                subprocess.Popen(["cmd.exe", "/c", "start", "", win_path])  # noqa: S603, S607
+            else:
+                subprocess.Popen(["xdg-open", str(_project.path)])  # noqa: S603, S607
     return f"Opened {_project.path.name} in GUI"  # type: ignore[union-attr]
 
 
@@ -248,8 +254,19 @@ _WIN_PRUSA_PATHS = [
     Path("/mnt/c/Program Files (x86)/Prusa3D/PrusaSlicer/prusa-slicer.exe"),
 ]
 
+# Typical Windows PrusaSlicer install locations, as native Windows paths
+_WIN_PRUSA_PATHS_NATIVE = [
+    Path("C:/Program Files/Prusa3D/PrusaSlicer/prusa-slicer.exe"),
+    Path("C:/Program Files (x86)/Prusa3D/PrusaSlicer/prusa-slicer.exe"),
+]
+
 
 def _cli_path() -> Path:
+    if platform.system() == "Windows":
+        for p in _WIN_PRUSA_PATHS_NATIVE:
+            if p.exists():
+                return p
+        return Path("prusa-slicer")  # fall back to PATH
     # Prefer a locally built binary, then Windows install (WSL), then system PATH
     built = Path.home() / "claude-code/PrusaSlicer/build/src/prusa-slicer"
     if built.exists():
@@ -262,6 +279,8 @@ def _cli_path() -> Path:
 
 
 def _datadir() -> Path:
+    if platform.system() == "Windows":
+        return Path(os.environ["APPDATA"]) / "PrusaSlicer"
     if _is_wsl():
         appdata = _win_appdata()
         if appdata:
