@@ -5,6 +5,7 @@ import functools
 import json
 import os
 import platform
+import re
 import subprocess
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -118,6 +119,27 @@ async def slice_model(output_path: str | None = None) -> str:
 
 
 @mcp.tool()
+def get_gui_state() -> str:
+    """Return the current state of the running PrusaSlicer GUI instance.
+
+    Reports whether PrusaSlicer is open, which file is shown in the title bar,
+    whether it has unsaved changes, and whether that file matches the active
+    project loaded in this MCP server.
+
+    Call this before open_in_gui to confirm the right file is already open,
+    or to warn the user if they have unsaved changes they should save first.
+    """
+    state = _read_gui_state()
+    if state is None:
+        return json.dumps({"running": False})
+
+    result: dict = {"running": True, **state}
+    if _project.path is not None:
+        result["matches_project"] = state["open_file"] == _project.path.stem
+    return json.dumps(result, indent=2)
+
+
+@mcp.tool()
 def open_in_gui() -> str:
     """Reopen the active project in PrusaSlicer GUI for visual review.
 
@@ -126,6 +148,16 @@ def open_in_gui() -> str:
     to apply Claude's setting changes without disturbing the current model view.
     """
     _project.require()
+
+    # Refuse to overwrite unsaved GUI edits — the user must save in PrusaSlicer first.
+    state = _read_gui_state()
+    if state and state.get("unsaved_changes"):
+        msg = (
+            "PrusaSlicer has unsaved changes. "
+            "Please save the project in PrusaSlicer first, then call open_in_gui again."
+        )
+        raise ValueError(msg)
+
     gui = _gui_path()
     if gui is not None:
         # --single-instance forwards the file to an already-open PrusaSlicer window
@@ -270,6 +302,42 @@ _WIN_PRUSA_PATHS_NATIVE = [
     Path("C:/Program Files/Prusa3D/PrusaSlicer/prusa-slicer.exe"),
     Path("C:/Program Files (x86)/Prusa3D/PrusaSlicer/prusa-slicer.exe"),
 ]
+
+
+def _read_gui_state() -> dict | None:
+    """Return {open_file, unsaved_changes} from the running PrusaSlicer window title, or None."""
+    if platform.system() == "Windows":
+        ps_cmd = "powershell"
+    elif _is_wsl():
+        ps_cmd = "powershell.exe"
+    else:
+        return None  # Linux without WSL — not supported yet
+
+    try:
+        ps_query = (
+            "Get-Process prusa-slicer -ErrorAction SilentlyContinue"
+            " | Select-Object -ExpandProperty MainWindowTitle"
+        )
+        result = subprocess.run(  # noqa: S603
+            [ps_cmd, "-Command", ps_query],
+            capture_output=True,
+            text=True,
+            timeout=5,
+            check=False,
+        )
+    except Exception:  # noqa: BLE001
+        return None
+
+    title = result.stdout.strip().strip("'")
+    if not title:
+        return None
+
+    # Title format: "filename - PrusaSlicer-2.x.y based on Slic3r"
+    #           or: "*filename - PrusaSlicer-2.x.y based on Slic3r" (unsaved changes)
+    m = re.match(r"^(\*)?(.+?)\s+-\s+PrusaSlicer", title)
+    if not m:
+        return None
+    return {"open_file": m.group(2).strip(), "unsaved_changes": m.group(1) == "*"}
 
 
 def _gui_path() -> Path | None:
