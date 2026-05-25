@@ -16,8 +16,26 @@ build-backend = "hatchling.build"
 
 [dependency-groups]
 dev = [
+    "pytest>=8.0",
+    "pytest-asyncio>=0.24",
+    "pytest-cov>=6.0",
     "requests>=2.0",
     "ruff>=0.15.14",
+]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
+
+[tool.coverage.run]
+source = ["prusa_mcp"]
+branch = true
+
+[tool.coverage.report]
+show_missing = true
+exclude_lines = [
+    "if TYPE_CHECKING:",
+    "def main",
 ]
 
 [tool.ruff]
@@ -93,3 +111,4 @@ max-complexity = 10
 
 [tool.ruff.lint.per-file-ignores]
 "scripts/**" = ["INP001", "T201"]
+"tests/**" = ["SLF001", "ANN", "S101", "PLR2004"]  # private access, no annotations, assert and magic values are idiomatic pytest
