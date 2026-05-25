@@ -101,7 +101,13 @@ ignore = [
     "ISC001", # single-line implicit string concatenation
     # S404 fires on every `import subprocess` regardless of actual safety
     "S404",
+    # assert is the entire point of pytest; bandit's concern (stripped by -O) doesn't apply to tests,
+    # and there's no value in restricting assert in production code either
+    "S101",
 ]
+
+[tool.ruff.lint.flake8-annotations]
+suppress-none-returning = true  # don't require -> None on functions with implicit None returns
 
 [tool.ruff.lint.isort]
 known-first-party = ["prusa_mcp"]
@@ -111,4 +117,4 @@ max-complexity = 10
 
 [tool.ruff.lint.per-file-ignores]
 "scripts/**" = ["INP001", "T201"]
-"tests/**" = ["SLF001", "ANN", "S101", "PLR2004"]  # private access, no annotations, assert and magic values are idiomatic pytest
+"tests/**" = ["SLF001", "PLR2004"]  # private member access and magic values are idiomatic pytest
