@@ -1,9 +1,9 @@
 """Tests for slicer.py — gcode stat parsing and CLI subprocess wrapper."""
 
 from pathlib import Path
-from unittest.mock import AsyncMock, patch
 
 import pytest
+from pytest_mock import MockerFixture
 
 from prusa_mcp import slicer
 
@@ -103,20 +103,18 @@ def test_parse_stats_layer_change_counts_full_file(tmp_path: Path) -> None:
 # --- slice_project ---
 
 
-async def test_slice_project_success(tmp_path: Path) -> None:
+async def test_slice_project_success(tmp_path: Path, mocker: MockerFixture) -> None:
     project_path = tmp_path / "model.3mf"
     project_path.touch()
     output_path = tmp_path / "out.gcode"
     output_path.write_text(GCODE_TAIL)
 
-    mock_proc = AsyncMock()
+    mock_proc = mocker.AsyncMock()
     mock_proc.returncode = 0
-    mock_proc.communicate = AsyncMock(return_value=(b"", b""))
+    mock_proc.communicate = mocker.AsyncMock(return_value=(b"", b""))
+    mock_exec = mocker.patch("asyncio.create_subprocess_exec", return_value=mock_proc)
 
-    with patch("asyncio.create_subprocess_exec", return_value=mock_proc) as mock_exec:
-        stats = await slicer.slice_project(
-            project_path, output_path, cli_path=Path("prusa-slicer")
-        )
+    stats = await slicer.slice_project(project_path, output_path, cli_path=Path("prusa-slicer"))
 
     cmd = mock_exec.call_args[0]
     assert "--export-gcode" in cmd
@@ -126,58 +124,52 @@ async def test_slice_project_success(tmp_path: Path) -> None:
     assert stats.layers == 142
 
 
-async def test_slice_project_passes_datadir(tmp_path: Path) -> None:
+async def test_slice_project_passes_datadir(tmp_path: Path, mocker: MockerFixture) -> None:
     project_path = tmp_path / "model.3mf"
     project_path.touch()
     output_path = tmp_path / "out.gcode"
     output_path.write_text(GCODE_TAIL)
     datadir = tmp_path / "config"
 
-    mock_proc = AsyncMock()
+    mock_proc = mocker.AsyncMock()
     mock_proc.returncode = 0
-    mock_proc.communicate = AsyncMock(return_value=(b"", b""))
+    mock_proc.communicate = mocker.AsyncMock(return_value=(b"", b""))
+    mock_exec = mocker.patch("asyncio.create_subprocess_exec", return_value=mock_proc)
 
-    with patch("asyncio.create_subprocess_exec", return_value=mock_proc) as mock_exec:
-        await slicer.slice_project(
-            project_path, output_path, cli_path=Path("prusa-slicer"), datadir=datadir
-        )
+    await slicer.slice_project(project_path, output_path, cli_path=Path("prusa-slicer"), datadir=datadir)
 
     cmd = mock_exec.call_args[0]
     assert "--datadir" in cmd
     assert str(datadir) in cmd
 
 
-async def test_slice_project_omits_datadir_when_none(tmp_path: Path) -> None:
+async def test_slice_project_omits_datadir_when_none(tmp_path: Path, mocker: MockerFixture) -> None:
     project_path = tmp_path / "model.3mf"
     project_path.touch()
     output_path = tmp_path / "out.gcode"
     output_path.write_text(GCODE_TAIL)
 
-    mock_proc = AsyncMock()
+    mock_proc = mocker.AsyncMock()
     mock_proc.returncode = 0
-    mock_proc.communicate = AsyncMock(return_value=(b"", b""))
+    mock_proc.communicate = mocker.AsyncMock(return_value=(b"", b""))
+    mock_exec = mocker.patch("asyncio.create_subprocess_exec", return_value=mock_proc)
 
-    with patch("asyncio.create_subprocess_exec", return_value=mock_proc) as mock_exec:
-        await slicer.slice_project(
-            project_path, output_path, cli_path=Path("prusa-slicer"), datadir=None
-        )
+    await slicer.slice_project(project_path, output_path, cli_path=Path("prusa-slicer"), datadir=None)
 
     cmd = mock_exec.call_args[0]
     assert "--datadir" not in cmd
 
 
-async def test_slice_project_failure_raises(tmp_path: Path) -> None:
+async def test_slice_project_failure_raises(tmp_path: Path, mocker: MockerFixture) -> None:
     project_path = tmp_path / "model.3mf"
     project_path.touch()
 
-    mock_proc = AsyncMock()
+    mock_proc = mocker.AsyncMock()
     mock_proc.returncode = 1
-    mock_proc.communicate = AsyncMock(return_value=(b"", b"slicing error"))
+    mock_proc.communicate = mocker.AsyncMock(return_value=(b"", b"slicing error"))
+    mocker.patch("asyncio.create_subprocess_exec", return_value=mock_proc)
 
-    with (
-        patch("asyncio.create_subprocess_exec", return_value=mock_proc),
-        pytest.raises(RuntimeError, match="prusa-slicer failed"),
-    ):
+    with pytest.raises(RuntimeError, match="prusa-slicer failed"):
         await slicer.slice_project(
             project_path, tmp_path / "out.gcode", cli_path=Path("prusa-slicer")
         )
