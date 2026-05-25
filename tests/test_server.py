@@ -1,6 +1,7 @@
 """Tests for server.py — schema annotation, config validation, and INI parsing."""
 
 from pathlib import Path
+from unittest.mock import MagicMock, patch
 
 import pytest
 
@@ -174,3 +175,72 @@ def test_parse_ini_strips_whitespace(tmp_path: Path) -> None:
     ini = tmp_path / "preset.ini"
     ini.write_text("  key  =  value  \n")
     assert server._parse_ini(ini) == {"key": "value"}
+
+
+# --- _read_gui_state ---
+
+
+def _mock_ps_result(stdout: str) -> MagicMock:
+    r = MagicMock()
+    r.stdout = stdout
+    return r
+
+
+def test_read_gui_state_returns_none_on_plain_linux() -> None:
+    # Linux without WSL has no PowerShell — function returns None immediately.
+    with (
+        patch("prusa_mcp.server.platform.system", return_value="Linux"),
+        patch.object(server, "_is_wsl", return_value=False),
+    ):
+        assert server._read_gui_state() is None
+
+
+def test_read_gui_state_parses_open_file() -> None:
+    with (
+        patch("prusa_mcp.server.platform.system", return_value="Windows"),
+        patch("prusa_mcp.server.subprocess.run", return_value=_mock_ps_result(
+            "mymodel - PrusaSlicer-2.8.0 based on Slic3r\n"
+        )),
+    ):
+        state = server._read_gui_state()
+    assert state == {"open_file": "mymodel", "unsaved_changes": False}
+
+
+def test_read_gui_state_detects_unsaved_changes() -> None:
+    # PrusaSlicer prefixes the title with "*" when there are unsaved changes.
+    with (
+        patch("prusa_mcp.server.platform.system", return_value="Windows"),
+        patch("prusa_mcp.server.subprocess.run", return_value=_mock_ps_result(
+            "*mymodel - PrusaSlicer-2.8.0 based on Slic3r\n"
+        )),
+    ):
+        state = server._read_gui_state()
+    assert state == {"open_file": "mymodel", "unsaved_changes": True}
+
+
+def test_read_gui_state_no_process_returns_none() -> None:
+    # Empty stdout means PrusaSlicer is not running.
+    with (
+        patch("prusa_mcp.server.platform.system", return_value="Windows"),
+        patch("prusa_mcp.server.subprocess.run", return_value=_mock_ps_result("")),
+    ):
+        assert server._read_gui_state() is None
+
+
+def test_read_gui_state_unrecognised_title_returns_none() -> None:
+    # A title that doesn't match the "... - PrusaSlicer" pattern must not crash.
+    with (
+        patch("prusa_mcp.server.platform.system", return_value="Windows"),
+        patch("prusa_mcp.server.subprocess.run", return_value=_mock_ps_result(
+            "Some Other Application\n"
+        )),
+    ):
+        assert server._read_gui_state() is None
+
+
+def test_read_gui_state_subprocess_error_returns_none() -> None:
+    with (
+        patch("prusa_mcp.server.platform.system", return_value="Windows"),
+        patch("prusa_mcp.server.subprocess.run", side_effect=OSError("no powershell")),
+    ):
+        assert server._read_gui_state() is None
