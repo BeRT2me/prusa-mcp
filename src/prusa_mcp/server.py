@@ -1,16 +1,17 @@
 """PrusaSlicer MCP server."""
 
-import base64
 import functools
 import json
 import os
 import platform
 import re
+import shutil
 import subprocess
+import tempfile
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from mcp.server.fastmcp import FastMCP
+from mcp.server.fastmcp import FastMCP, Image
 
 from . import project, slicer
 
@@ -22,6 +23,7 @@ class _ProjectState:
     # Single active project — this server is inherently single-user/single-session
     path: Path | None = None
     config: dict[str, str] = field(default_factory=dict)
+    original_config: dict[str, str] = field(default_factory=dict)
 
     def require(self) -> None:
         if self.path is None:
@@ -41,12 +43,12 @@ _SCHEMA: dict[str, dict] = (
 # --- Tools ---
 
 
-@mcp.tool()
-def load_project(path: str) -> str:
+@mcp.tool(structured_output=False)
+def load_project(path: str) -> list[str | Image]:
     """Load a .3mf project file and read its print settings.
 
-    Returns a summary of the loaded project with annotated key settings.
-    Also provides the embedded thumbnail as a base64 PNG for visual context.
+    Returns a summary of the loaded project with annotated key settings,
+    plus the embedded thumbnail image for visual context.
     """
     p = Path(path).expanduser().resolve()
     if not p.exists():
@@ -58,27 +60,34 @@ def load_project(path: str) -> str:
 
     _project.path = p
     _project.config = project.read_config(p)
-
-    thumbnail = project.read_thumbnail(p)
-    thumb_info = ""
-    if thumbnail:
-        b64 = base64.b64encode(thumbnail).decode()
-        thumb_info = f"\nthumbnail_png_base64: {b64}"
+    _project.original_config = dict(_project.config)
 
     summary = {k: _annotate(k, _project.config[k]) for k in _SUMMARY_KEYS if k in _project.config}
-    return f"Loaded: {p.name}\n{json.dumps(summary, indent=2)}{thumb_info}"
+    result: list[str | Image] = [f"Loaded: {p.name}\n{json.dumps(summary, indent=2)}"]
+    if thumbnail := project.read_thumbnail(p):
+        result.append(Image(data=thumbnail, format="png"))
+    return result
 
 
 @mcp.tool()
 def get_config(keys: list[str] | None = None) -> str:
-    """Get print settings from the active project with descriptions and valid values.
+    """Get print settings from the active project.
 
-    Pass a list of keys to retrieve specific settings, or omit to get all settings.
-    Each value is annotated with its label, units, valid range, and tooltip.
+    Pass a list of keys to retrieve specific settings, annotated with label, units,
+    valid range, and tooltip. Omit keys to get all settings as bare key/value pairs
+    (unannotated — the full annotated dump would be enormous).
     """
     _project.require()
-    items = _project.config if keys is None else {k: _project.config[k] for k in keys if k in _project.config}
-    return json.dumps({k: _annotate(k, v) for k, v in items.items()}, indent=2)
+    if keys is None:
+        return json.dumps(_project.config, indent=2)
+
+    result: dict = {k: _annotate(k, _project.config[k]) for k in keys if k in _project.config}
+    if missing := [k for k in keys if k not in _project.config]:
+        if not result:
+            msg = f"No such settings in project: {', '.join(missing)}"
+            raise ValueError(msg)
+        result["_missing"] = missing
+    return json.dumps(result, indent=2)
 
 
 @mcp.tool()
@@ -89,14 +98,14 @@ def set_config(settings: dict[str, str]) -> str:
     Example: {"layer_height": "0.3", "fill_density": "20%", "fill_pattern": "gyroid"}
     """
     _project.require()
+    _validate_settings(settings)
 
-    errors = {k: msg for k in settings if (msg := _validate(k, settings[k]))}
-    if errors:
-        msg = "Validation errors:\n" + "\n".join(f"  {k}: {v}" for k, v in errors.items())
-        raise ValueError(msg)
-
-    _project.config.update(settings)
-    project.write_config(_project.path, _project.config)  # type: ignore[arg-type]
+    # Re-read from disk so external edits (e.g. GUI saves) aren't clobbered,
+    # and only update in-memory state after the write succeeds.
+    config = project.read_config(_project.path)  # type: ignore[arg-type]
+    config.update(settings)
+    project.write_config(_project.path, config)  # type: ignore[arg-type]
+    _project.config = config
     return f"Updated: {', '.join(f'{k}={v}' for k, v in settings.items())}"
 
 
@@ -108,7 +117,11 @@ async def slice_model(output_path: str | None = None) -> str:
     Returns estimated print time, filament usage, and layer count.
     """
     _project.require()
-    out = Path(output_path) if output_path else _project.path.with_suffix(".gcode")  # type: ignore[union-attr]
+    out = (
+        Path(output_path).expanduser().resolve()  # noqa: ASYNC240 — trivial next to the slice itself
+        if output_path
+        else _project.path.with_suffix(".gcode")  # type: ignore[union-attr]
+    )
     stats = await slicer.slice_project(
         _project.path,  # type: ignore[arg-type]
         out,
@@ -116,6 +129,83 @@ async def slice_model(output_path: str | None = None) -> str:
         datadir=_datadir(),
     )
     return json.dumps(stats.model_dump(), indent=2)
+
+
+@mcp.tool()
+async def compare_stats(settings: dict[str, str]) -> str:
+    """Slice the project with and without candidate settings and compare the results.
+
+    Both slices run against temporary copies — the project file and its config are
+    never modified. Returns baseline stats, candidate stats, and their delta.
+    Example: {"fill_pattern": "grid", "fill_density": "10%"}
+    """
+    _project.require()
+    _validate_settings(settings)
+
+    with tempfile.TemporaryDirectory() as td:
+        tmp = Path(td)
+        candidate_3mf = tmp / _project.path.name  # type: ignore[union-attr]
+        shutil.copy2(_project.path, candidate_3mf)  # type: ignore[arg-type]
+        config = project.read_config(candidate_3mf)
+        config.update(settings)
+        project.write_config(candidate_3mf, config)
+
+        baseline = await slicer.slice_project(
+            _project.path,  # type: ignore[arg-type]
+            tmp / "baseline.gcode",
+            cli_path=_cli_path(),
+            datadir=_datadir(),
+        )
+        candidate = await slicer.slice_project(
+            candidate_3mf,
+            tmp / "candidate.gcode",
+            cli_path=_cli_path(),
+            datadir=_datadir(),
+        )
+
+    result = {
+        "changed_settings": settings,
+        "baseline": baseline.model_dump(),
+        "candidate": candidate.model_dump(),
+        "delta": slicer.stats_delta(baseline, candidate),
+    }
+    return json.dumps(result, indent=2)
+
+
+@mcp.tool()
+def diff_config(preset_type: str | None = None, name: str | None = None) -> str:
+    """Show settings that differ from a reference config.
+
+    With no arguments, compares against the settings as they were when load_project
+    was called — i.e. what has changed this session. Pass preset_type ('printer',
+    'filament', or 'print') and name to compare against a saved preset instead;
+    only the keys present in the preset are compared.
+    """
+    _project.require()
+    if (preset_type is None) != (name is None):
+        msg = "Pass both preset_type and name, or neither"
+        raise ValueError(msg)
+
+    if preset_type is None:
+        keys = _project.original_config.keys() | _project.config.keys()
+        diff = {
+            k: {"was": _project.original_config.get(k), "now": _project.config.get(k)}
+            for k in sorted(keys)
+            if _project.original_config.get(k) != _project.config.get(k)
+        }
+    else:
+        preset_path = _preset_dir(preset_type) / f"{name}.ini"
+        if not preset_path.exists():
+            msg = f"Preset not found: {preset_type}/{name}"
+            raise ValueError(msg)
+        preset = _parse_ini(preset_path)
+        preset.pop("inherits", None)
+        diff = {
+            k: {"preset": v, "project": _project.config.get(k)}
+            for k, v in sorted(preset.items())
+            if _project.config.get(k) != v
+        }
+    return json.dumps(diff, indent=2)
 
 
 @mcp.tool()
@@ -182,10 +272,7 @@ def open_in_gui() -> str:
 @mcp.tool()
 def list_presets(preset_type: str) -> str:
     """List available presets by type: 'printer', 'filament', or 'print'."""
-    if preset_type not in {"printer", "filament", "print"}:
-        msg = "preset_type must be 'printer', 'filament', or 'print'"
-        raise ValueError(msg)
-    preset_dir = _datadir() / preset_type
+    preset_dir = _preset_dir(preset_type)
     if not preset_dir.exists():
         return json.dumps([])
     names = [p.stem for p in sorted(preset_dir.glob("*.ini"))]
@@ -200,22 +287,45 @@ def load_preset(preset_type: str, name: str) -> str:
     preset_type: 'printer', 'filament', or 'print'
     """
     _project.require()
-    if preset_type not in {"printer", "filament", "print"}:
-        msg = "preset_type must be 'printer', 'filament', or 'print'"
-        raise ValueError(msg)
-
-    preset_path = _datadir() / preset_type / f"{name}.ini"
+    preset_path = _preset_dir(preset_type) / f"{name}.ini"
     if not preset_path.exists():
         msg = f"Preset not found: {preset_type}/{name}"
         raise ValueError(msg)
 
     preset_config = _parse_ini(preset_path)
-    _project.config.update(preset_config)
-    project.write_config(_project.path, _project.config)  # type: ignore[arg-type]
-    return f"Applied {preset_type} preset '{name}' ({len(preset_config)} settings)"
+    # User presets are often deltas over a system profile — the parent's settings
+    # are not in the .ini, so the merge below may be incomplete.
+    inherits = preset_config.pop("inherits", "")
+
+    config = project.read_config(_project.path)  # type: ignore[arg-type]
+    config.update(preset_config)
+    project.write_config(_project.path, config)  # type: ignore[arg-type]
+    _project.config = config
+
+    result = f"Applied {preset_type} preset '{name}' ({len(preset_config)} settings)"
+    if inherits:
+        result = (
+            f"Warning: this preset inherits from '{inherits}' — only its overrides were "
+            f"applied; inherited settings are unchanged.\n{result}"
+        )
+    return result
 
 
 # --- Schema helpers ---
+
+
+def _validate_settings(settings: dict[str, str]) -> None:
+    errors = {k: msg for k in settings if (msg := _validate(k, settings[k]))}
+    if errors:
+        msg = "Validation errors:\n" + "\n".join(f"  {k}: {v}" for k, v in errors.items())
+        raise ValueError(msg)
+
+
+def _preset_dir(preset_type: str) -> Path:
+    if preset_type not in {"printer", "filament", "print"}:
+        msg = "preset_type must be 'printer', 'filament', or 'print'"
+        raise ValueError(msg)
+    return _datadir() / preset_type
 
 
 def _annotate(key: str, value: str) -> dict:
@@ -245,22 +355,29 @@ def _validate(key: str, value: str) -> str | None:
     if not info:
         return None  # Unknown key — pass through, PrusaSlicer will catch it
 
-    if value == "nil" and not info.get("nullable"):
-        return "not nullable — use a concrete value or omit"
+    if value == "nil":
+        return None if info.get("nullable") else "not nullable — use a concrete value or omit"
 
     if "enum_values" in info and value not in info["enum_values"]:
         return f"must be one of: {', '.join(info['enum_values'])}"
 
-    if info.get("type") in {"float", "int", "percent"} and value != "nil":
-        try:
-            num = float(value.rstrip("%"))
-            if "min" in info and num < info["min"]:
-                return f"minimum is {info['min']}"
-            if "max" in info and num > info["max"]:
-                return f"maximum is {info['max']}"
-        except ValueError:
-            pass
+    match info.get("type"):
+        case "float" | "int" | "percent" | "float_or_percent":
+            return _validate_number(info, value)
+        case "bool":
+            return None if value in {"0", "1"} else "must be 0 or 1"
+    return None
 
+
+def _validate_number(info: dict, value: str) -> str | None:
+    try:
+        num = float(value.rstrip("%"))
+    except ValueError:
+        return f"not a valid number: {value!r}"
+    if "min" in info and num < info["min"]:
+        return f"minimum is {info['min']}"
+    if "max" in info and num > info["max"]:
+        return f"maximum is {info['max']}"
     return None
 
 
@@ -342,6 +459,8 @@ def _read_gui_state() -> dict | None:
 
 def _gui_path() -> Path | None:
     """Return the PrusaSlicer GUI binary path, or None if not found."""
+    if env := os.environ.get("PRUSA_MCP_GUI"):
+        return Path(env)
     if platform.system() == "Windows":
         for p in _WIN_PRUSA_PATHS_NATIVE:
             if p.exists():
@@ -354,6 +473,8 @@ def _gui_path() -> Path | None:
 
 
 def _cli_path() -> Path:
+    if env := os.environ.get("PRUSA_MCP_CLI"):
+        return Path(env)
     if platform.system() == "Windows":
         for p in _WIN_PRUSA_PATHS_NATIVE:
             if p.exists():
@@ -371,6 +492,8 @@ def _cli_path() -> Path:
 
 
 def _datadir() -> Path:
+    if env := os.environ.get("PRUSA_MCP_DATADIR"):
+        return Path(env)
     if platform.system() == "Windows":
         return Path(os.environ["APPDATA"]) / "PrusaSlicer"
     if _is_wsl():

@@ -6,7 +6,7 @@ An MCP server that lets Claude interact with PrusaSlicer — tweaking print sett
 
 **Working and committed to https://github.com/BeRT2me/prusa-mcp**
 
-- ✅ FastMCP server with 8 tools (see below)
+- ✅ FastMCP server with 10 tools (see below)
 - ✅ 3MF read/write (`project.py`) — parses `; key = value` gcode-comment config format
 - ✅ CLI subprocess wrapper + gcode stat parser (`slicer.py`)
 - ✅ Config schema: 580 options, 97 help URLs extracted from PrusaSlicer source
@@ -17,7 +17,11 @@ An MCP server that lets Claude interact with PrusaSlicer — tweaking print sett
 - ✅ `get_gui_state` reads running PrusaSlicer window title via PowerShell (Windows/WSL)
 - ✅ `open_in_gui` guards against unsaved changes; uses `--single-instance` to reuse open window
 - ✅ Native Windows support for `_cli_path`, `_datadir`, `open_in_gui`
-- ✅ Pytest suite: 56 tests, 100% coverage on `project.py` and `slicer.py`
+- ✅ Slicer warnings surfaced in `SliceStats.warnings` (stdout blocks between `NN =>` progress lines)
+- ✅ Stats include stealth-mode time, first-layer time, and filament cost (all from the gcode footer)
+- ✅ `compare_stats` A/B-slices on temp copies — never mutates the project file
+- ✅ `diff_config` vs load-time snapshot or vs a named preset
+- ✅ Pytest suite: 87 tests, 100% coverage on `project.py` and `slicer.py`
 
 ## Next Steps
 
@@ -52,11 +56,28 @@ The repo has no README yet. Should cover:
 - Call `slice_model`, verify stats come back
 - Confirm `open_in_gui` round-trip
 
-### 5. Nice-to-haves (future)
-- `get_thumbnail` tool — return embedded 3MF thumbnail as MCP Image type (not just base64 in text)
-- Post-slice thumbnail — PrusaSlicer can generate a preview; expose it
-- `compare_stats` — slice twice with different settings, return side-by-side diff
-- Support for per-object config overrides (`Slic3r_PE_model.config`)
+### 5. STL/OBJ import (planned)
+New `import_model(path)` tool: run CLI `--export-3mf` to wrap the mesh in a project
+`.3mf`, then load it. CLI-exported 3mfs have no `Slic3r_PE.config` — `write_config`
+creates the member, and `load_preset` fills in real settings. The cube smoke test
+already proved this pipeline end to end.
+
+### 6. Model transforms (planned)
+New `transform_model(scale=None, rotate_z=None, duplicate=None)` tool: CLI
+`--scale/--rotate/--duplicate` + `--export-3mf` to a temp file, then atomic-replace
+the project and reload config. **Verify first** whether CLI export preserves the
+config member; if not, snapshot the config before and re-apply after. Guard on
+GUI unsaved changes like `open_in_gui` does.
+
+### 7. Per-object overrides (planned)
+`Metadata/Slic3r_PE_model.config` is XML (per-object `<metadata>` elements), not the
+`; key = value` format — needs ElementTree parsing in `project.py`. Tools:
+`get_object_overrides()` / `set_object_override(object_id, settings)`, validation via
+the existing `_validate`. Inspect a real GUI-saved multi-object 3mf before building.
+
+### 8. Nice-to-haves (future)
+- Post-slice thumbnail — PrusaSlicer can generate a preview of the sliced result; expose it
+- Publish to PyPI so `uvx prusa-mcp` works in Claude Desktop configs (needs README + CI first)
 
 ---
 
@@ -119,6 +140,11 @@ PrusaSlicer 2.9+ (BGCode format) omits `total layers count` — the parser falls
 to counting `;LAYER_CHANGE` markers in the full file. `--no-binary-gcode` is passed
 to the CLI to force text gcode output.
 
+### Platform support
+Windows, WSL, and Linux. macOS is deliberately unsupported (wrong datadir path,
+no `xdg-open`) — decided in the 2026-07 review; revisit only if a mac user shows up.
+`PRUSA_MCP_CLI`, `PRUSA_MCP_GUI`, and `PRUSA_MCP_DATADIR` env vars override path detection.
+
 ### GUI state detection
 `get_gui_state` reads the PrusaSlicer window title via PowerShell on Windows/WSL.
 Title format: `filename - PrusaSlicer-2.x.y based on Slic3r`
@@ -142,7 +168,7 @@ uv run scripts/extract_config_schema.py ../PrusaSlicer/src/libslic3r/PrintConfig
 
 ## Test Suite
 
-56 tests across three files, run with:
+87 tests across three files, run with:
 ```bash
 uv run pytest --cov --cov-report=term-missing
 ```
@@ -165,7 +191,9 @@ Uses `pytest-mock` (`mocker` fixture) throughout — no `unittest.mock` imports 
 | `load_project` | Load .3mf, return annotated key settings + thumbnail |
 | `get_config` | Read settings with tooltips, units, valid values |
 | `set_config` | Validate + update settings, write to .3mf |
-| `slice_model` | Run CLI slicer, return print time / filament / layers |
+| `slice_model` | Run CLI slicer, return times / filament / cost / layers / warnings |
+| `compare_stats` | A/B-slice candidate settings on temp copies, return stats + delta |
+| `diff_config` | Show settings changed this session, or vs a named preset |
 | `get_gui_state` | Read running PrusaSlicer window title (Windows/WSL only) |
 | `open_in_gui` | Reopen active .3mf in PrusaSlicer GUI (guards unsaved changes) |
 | `list_presets` | List printer/filament/print presets from user config |

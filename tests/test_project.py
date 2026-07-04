@@ -1,9 +1,22 @@
 """Tests for project.py — .3mf ZIP manipulation and config parsing."""
 
+import io
 import zipfile
 from pathlib import Path
 
+import pytest
+
 from prusa_mcp import project
+
+
+def _3mf_without_config(tmp_path: Path) -> Path:
+    """Build a .3mf (e.g. from a non-PrusaSlicer exporter) that has no Slic3r_PE.config."""
+    p = tmp_path / "foreign.3mf"
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w") as z:
+        z.writestr("3D/3dmodel.model", "<model/>")
+    p.write_bytes(buf.getvalue())
+    return p
 
 # --- _parse_config ---
 
@@ -102,3 +115,18 @@ def test_write_config_preserves_other_zip_members(minimal_3mf: Path) -> None:
 def test_write_config_overwrites_existing_value(minimal_3mf: Path) -> None:
     project.write_config(minimal_3mf, {"fill_pattern": "rectilinear"})
     assert project.read_config(minimal_3mf)["fill_pattern"] == "rectilinear"
+
+
+def test_write_config_creates_member_when_absent(tmp_path: Path) -> None:
+    # A .3mf without Slic3r_PE.config must gain one — not silently drop the write
+    p = _3mf_without_config(tmp_path)
+    project.write_config(p, {"layer_height": "0.2"})
+    assert project.read_config(p) == {"layer_height": "0.2"}
+    with zipfile.ZipFile(p) as z:
+        assert "3D/3dmodel.model" in z.namelist()
+
+
+def test_read_config_missing_member_raises_value_error(tmp_path: Path) -> None:
+    p = _3mf_without_config(tmp_path)
+    with pytest.raises(ValueError, match=r"Slic3r_PE\.config"):
+        project.read_config(p)

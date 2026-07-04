@@ -116,10 +116,67 @@ def test_validate_percent_strips_symbol_before_range_check(mocker: MockerFixture
     assert server._validate("_pct", "150%") is not None
 
 
+@pytest.mark.parametrize("type_", ["float", "int", "percent", "float_or_percent"])
+def test_validate_rejects_non_numeric(mocker: MockerFixture, type_: str) -> None:
+    # Garbage like "abc" must not slip through into the .3mf
+    mocker.patch.dict(server._SCHEMA, {"_bad": {"type": type_}})
+    err = server._validate("_bad", "abc")
+    assert err is not None
+    assert "not a valid number" in err
+
+
+def test_validate_float_or_percent_range(mocker: MockerFixture) -> None:
+    mocker.patch.dict(server._SCHEMA, {"_fop": {"type": "float_or_percent", "min": 0, "max": 200}})
+    assert server._validate("_fop", "150%") is None
+    assert server._validate("_fop", "0.45") is None
+    assert server._validate("_fop", "250%") is not None
+
+
+@pytest.mark.parametrize(
+    ("value", "ok"),
+    [("0", True), ("1", True), ("true", False), ("yes", False), ("2", False)],
+)
+def test_validate_bool(mocker: MockerFixture, value: str, ok: bool) -> None:  # noqa: FBT001
+    mocker.patch.dict(server._SCHEMA, {"_flag": {"type": "bool"}})
+    result = server._validate("_flag", value)
+    assert (result is None) == ok
+
+
 def test_validate_nil_bypasses_numeric_check(mocker: MockerFixture) -> None:
     # nil is a valid sentinel for nullable numeric fields — must not raise a float() error
     mocker.patch.dict(server._SCHEMA, {"_nilnum": {"type": "float", "min": 0.0, "nullable": True}})
     assert server._validate("_nilnum", "nil") is None
+
+
+# --- _validate_settings ---
+
+
+def test_validate_settings_passes_valid(mocker: MockerFixture) -> None:
+    mocker.patch.dict(server._SCHEMA, {"_num": {"type": "float", "min": 0.1, "max": 1.0}})
+    server._validate_settings({"_num": "0.3"})  # must not raise
+
+
+def test_validate_settings_collects_all_errors(mocker: MockerFixture) -> None:
+    mocker.patch.dict(
+        server._SCHEMA,
+        {"_a": {"type": "float"}, "_b": {"enum_values": ["x", "y"]}},
+    )
+    with pytest.raises(ValueError, match=r"(?s)_a.*_b") as exc_info:
+        server._validate_settings({"_a": "junk", "_b": "z"})
+    assert "not a valid number" in str(exc_info.value)
+
+
+# --- _preset_dir ---
+
+
+def test_preset_dir_rejects_unknown_type() -> None:
+    with pytest.raises(ValueError, match="preset_type"):
+        server._preset_dir("nonsense")
+
+
+def test_preset_dir_builds_path(mocker: MockerFixture) -> None:
+    mocker.patch.object(server, "_datadir", return_value=Path("/data"))
+    assert server._preset_dir("filament") == Path("/data/filament")
 
 
 # --- _parse_ini ---
