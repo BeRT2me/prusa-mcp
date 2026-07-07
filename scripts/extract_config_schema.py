@@ -4,10 +4,14 @@ Extract PrusaSlicer config option definitions from PrintConfig.cpp and help
 URLs from Tab.cpp into a structured JSON file for use by the MCP server.
 
 Usage:
-    uv run scripts/extract_config_schema.py <path/to/src/libslic3r/PrintConfig.cpp>
+    # Fetch from GitHub (defaults to latest release):
+    uv run scripts/extract_config_schema.py
 
-Tab.cpp is expected alongside PrintConfig.cpp at:
-    <src_root>/slic3r/GUI/Tab.cpp
+    # Fetch a specific branch, tag, or commit:
+    uv run scripts/extract_config_schema.py --ref v2.8.1
+
+    # Use a local source tree:
+    uv run scripts/extract_config_schema.py path/to/PrintConfig.cpp
 
 Output:
     src/prusa_mcp/config_schema.json
@@ -15,12 +19,20 @@ Output:
 Re-run after updating PrusaSlicer to keep the schema current.
 """
 
+import argparse
+import contextlib
 import json
 import re
 import sys
 from pathlib import Path
 
+import requests
+
 OUTPUT = Path(__file__).parent.parent / "src/prusa_mcp/config_schema.json"
+
+_REPO = "prusa3d/PrusaSlicer"
+_PRINT_CONFIG_PATH = "src/libslic3r/PrintConfig.cpp"
+_TAB_CPP_PATH = "src/slic3r/GUI/Tab.cpp"
 
 _TYPE_MAP = {
     "coFloat": "float",
@@ -50,12 +62,44 @@ _MODE_MAP = {
 # Base retract keys that PrusaSlicer dynamically generates as nullable
 # filament_* overrides via a loop at the end of PrintConfigDef::PrintConfigDef()
 _FILAMENT_RETRACT_BASES = [
-    "retract_length", "retract_lift", "retract_lift_above", "retract_lift_below",
-    "retract_speed", "travel_max_lift", "deretract_speed", "retract_restart_extra",
-    "retract_before_travel", "retract_length_toolchange", "retract_restart_extra_toolchange",
-    "retract_layer_change", "wipe", "travel_lift_before_obstacle", "travel_ramping_lift",
-    "retract_before_wipe", "travel_slope", "seam_gap_distance",
+    "retract_length",
+    "retract_lift",
+    "retract_lift_above",
+    "retract_lift_below",
+    "retract_speed",
+    "travel_max_lift",
+    "deretract_speed",
+    "retract_restart_extra",
+    "retract_before_travel",
+    "retract_length_toolchange",
+    "retract_restart_extra_toolchange",
+    "retract_layer_change",
+    "wipe",
+    "travel_lift_before_obstacle",
+    "travel_ramping_lift",
+    "retract_before_wipe",
+    "travel_slope",
+    "seam_gap_distance",
 ]
+
+
+def _fetch_ref(ref: str | None) -> str:
+    """Resolve ref to a concrete git ref, defaulting to the latest release tag."""
+    if ref:
+        return ref
+    resp = requests.get(f"https://api.github.com/repos/{_REPO}/releases/latest", timeout=10)
+    resp.raise_for_status()
+    tag = resp.json()["tag_name"]
+    print(f"Latest release: {tag}")
+    return tag
+
+
+def _fetch_file(ref: str, path: str) -> str:
+    url = f"https://raw.githubusercontent.com/{_REPO}/{ref}/{path}"
+    print(f"Fetching {url} ...")
+    resp = requests.get(url, timeout=30)
+    resp.raise_for_status()
+    return resp.text
 
 
 def _collect_until(lines: list[str], start: int, end: str) -> tuple[str, int]:
@@ -70,17 +114,14 @@ def _collect_until(lines: list[str], start: int, end: str) -> tuple[str, int]:
 
 def _extract_strings(s: str) -> list[str]:
     """Pull all double-quoted string contents from a C++ expression."""
-    return [
-        p.replace("\\n", "\n").replace('\\"', '"')
-        for p in re.findall(r'"((?:[^"\\]|\\.)*)"', s)
-    ]
+    return [p.replace("\\n", "\n").replace('\\"', '"') for p in re.findall(r'"((?:[^"\\]|\\.)*)"', s)]
 
 
 def _parse_enum_block(block: str) -> tuple[list[str], list[str]]:
-    """
-    Parse an enum block into (values, labels).
-    Handles both plain lists  "a", "b", "c"
-    and paired lists           { "a", L("A") }, { "b", L("B") }
+    """Parse an enum block into (values, labels).
+
+    Handles both plain lists ``"a", "b", "c"``
+    and paired lists ``{ "a", L("A") }, { "b", L("B") }``.
     """
     strings = _extract_strings(block)
     # Pairs are indicated by inner braces: { "val", "label" }
@@ -92,8 +133,40 @@ def _parse_enum_block(block: str) -> tuple[list[str], list[str]]:
     return strings, []
 
 
-def parse(cpp_path: Path) -> dict[str, dict]:
-    lines = cpp_path.read_text(encoding="utf-8", errors="replace").splitlines()
+def _apply_field_assignment(field: str, rest: str, current: dict) -> None:
+    match field:
+        case "label" | "full_label" | "tooltip" | "sidetext" | "category" | "ratio_over":
+            v = "".join(_extract_strings(rest))
+            if v:
+                current[field] = v
+        case "min" | "max":
+            with contextlib.suppress(ValueError):
+                current[field] = float(rest)
+        case "mode":
+            current["mode"] = _MODE_MAP.get(rest, rest)
+
+
+def _synthesize_filament_overrides(options: dict[str, dict]) -> None:
+    # filament_retract_* options are generated dynamically in PrintConfig — not literally
+    # written as add("filament_retract_speed", ...) — so we synthesise them post-parse.
+    # nil = "use printer default for the base retract key".
+    for base_key in _FILAMENT_RETRACT_BASES:
+        if base_key not in options:
+            continue
+        base = options[base_key]
+        filament_key = f"filament_{base_key}"
+        if filament_key in options:
+            continue
+        entry: dict = {"type": base["type"], "nullable": True}
+        for field in ("label", "full_label", "tooltip", "sidetext", "category", "mode"):
+            if field in base:
+                entry[field] = base[field]
+        entry["nil_means"] = f"Inherit printer default ({base_key})"
+        options[filament_key] = entry
+
+
+def parse(text: str) -> dict[str, dict]:
+    lines = text.splitlines()
     options: dict[str, dict] = {}
     current: dict | None = None
     i = 0
@@ -102,9 +175,7 @@ def parse(cpp_path: Path) -> dict[str, dict]:
         line = lines[i].strip()
 
         # New option definition
-        m = re.match(
-            r"def\s*=\s*this->add(_nullable)?\s*\(\s*\"([^\"]+)\"\s*,\s*(\w+)\s*\)", line
-        )
+        m = re.match(r"def\s*=\s*this->add(_nullable)?\s*\(\s*\"([^\"]+)\"\s*,\s*(\w+)\s*\)", line)
         if m:
             current = {
                 "type": _TYPE_MAP.get(m.group(3), m.group(3)),
@@ -122,22 +193,9 @@ def parse(cpp_path: Path) -> dict[str, dict]:
         m = re.match(r"def->(\w+)\s*=\s*(.*)", line)
         if m:
             field = m.group(1)
-            text, i = _collect_until(lines, i, ";")
-            rest = text.split("=", 1)[1].strip().rstrip(";").strip()
-
-            match field:
-                case "label" | "full_label" | "tooltip" | "sidetext" | "category" | "ratio_over":
-                    v = "".join(_extract_strings(rest))
-                    if v:
-                        current[field] = v
-                case "min" | "max":
-                    try:
-                        current[field] = float(rest)
-                    except ValueError:
-                        pass
-                case "mode":
-                    current["mode"] = _MODE_MAP.get(rest, rest)
-
+            text_block, i = _collect_until(lines, i, ";")
+            rest = text_block.split("=", 1)[1].strip().rstrip(";").strip()
+            _apply_field_assignment(field, rest, current)
             i += 1
             continue
 
@@ -159,22 +217,7 @@ def parse(cpp_path: Path) -> dict[str, dict]:
 
         i += 1
 
-    # Synthesise filament_* nullable overrides that PrintConfig generates dynamically.
-    # Each is a nullable copy of its base retract option, meaning nil = "use printer default".
-    for base_key in _FILAMENT_RETRACT_BASES:
-        if base_key not in options:
-            continue
-        base = options[base_key]
-        filament_key = f"filament_{base_key}"
-        if filament_key in options:
-            continue  # already parsed (shouldn't happen, but be safe)
-        entry: dict = {"type": base["type"], "nullable": True}
-        for field in ("label", "full_label", "tooltip", "sidetext", "category", "mode"):
-            if field in base:
-                entry[field] = base[field]
-        entry["nil_means"] = f"Inherit printer default ({base_key})"
-        options[filament_key] = entry
-
+    _synthesize_filament_overrides(options)
     return options
 
 
@@ -199,14 +242,13 @@ def _resolve_str_expr(expr: str, variables: dict[str, str]) -> str | None:
     return None
 
 
-def parse_help_urls(tab_cpp_path: Path) -> dict[str, str]:
+def parse_help_urls(text: str) -> dict[str, str]:
     """Extract per-option help URLs from the GUI Tab.cpp registration code."""
-    lines = tab_cpp_path.read_text(encoding="utf-8", errors="replace").splitlines()
     variables: dict[str, str] = {}
     urls: dict[str, str] = {}
 
-    for line in lines:
-        line = line.strip()
+    for raw in text.splitlines():
+        line = raw.strip()
 
         # String variable assignment:  [std::string] name = "value";
         if m := re.match(r"(?:std::string\s+)?(\w+)\s*=\s*(.+?)\s*;$", line):
@@ -216,9 +258,7 @@ def parse_help_urls(tab_cpp_path: Path) -> dict[str, str]:
 
         # append_single_option_line("key")  — no URL, skip
         # append_single_option_line("key", path_expr)  — has URL
-        if m := re.match(
-            r'optgroup->append_single_option_line\(\s*"([^"]+)"\s*,\s*(.+?)\s*\)\s*;', line
-        ):
+        if m := re.match(r'optgroup->append_single_option_line\(\s*"([^"]+)"\s*,\s*(.+?)\s*\)\s*;', line):
             path_end = _resolve_str_expr(m.group(2), variables)
             if path_end:
                 urls[m.group(1)] = _HELP_BASE + path_end
@@ -227,31 +267,52 @@ def parse_help_urls(tab_cpp_path: Path) -> dict[str, str]:
 
 
 def main() -> None:
-    if len(sys.argv) != 2:
-        print(f"Usage: {sys.argv[0]} <path/to/PrintConfig.cpp>", file=sys.stderr)
-        sys.exit(1)
+    parser = argparse.ArgumentParser(description="Extract PrusaSlicer config schema.")
+    group = parser.add_mutually_exclusive_group()
+    group.add_argument(
+        "local_path",
+        nargs="?",
+        metavar="PrintConfig.cpp",
+        help="Path to a local PrintConfig.cpp (Tab.cpp expected alongside it)",
+    )
+    group.add_argument(
+        "--ref",
+        metavar="REF",
+        help="GitHub branch, tag, or commit to fetch from (default: latest release)",
+    )
+    args = parser.parse_args()
 
-    cpp_path = Path(sys.argv[1])
-    if not cpp_path.exists():
-        print(f"File not found: {cpp_path}", file=sys.stderr)
-        sys.exit(1)
+    if args.local_path:
+        cpp_path = Path(args.local_path)
+        if not cpp_path.exists():
+            msg = f"File not found: {cpp_path}"
+            print(msg, file=sys.stderr)
+            sys.exit(1)
+        print_config_text = cpp_path.read_text(encoding="utf-8", errors="replace")
+        tab_cpp_path = cpp_path.parent.parent / "slic3r/GUI/Tab.cpp"
+        tab_cpp_text = (
+            tab_cpp_path.read_text(encoding="utf-8", errors="replace") if tab_cpp_path.exists() else None
+        )
+        if tab_cpp_text is None:
+            print(f"Tab.cpp not found at {tab_cpp_path}, skipping help URLs", file=sys.stderr)
+    else:
+        ref = _fetch_ref(args.ref)
+        print_config_text = _fetch_file(ref, _PRINT_CONFIG_PATH)
+        try:
+            tab_cpp_text = _fetch_file(ref, _TAB_CPP_PATH)
+        except requests.HTTPError as e:
+            print(f"Could not fetch Tab.cpp: {e}, skipping help URLs", file=sys.stderr)
+            tab_cpp_text = None
 
-    # Tab.cpp lives at ../slic3r/GUI/Tab.cpp relative to PrintConfig.cpp's directory
-    tab_cpp_path = cpp_path.parent.parent / "slic3r/GUI/Tab.cpp"
-
-    print(f"Parsing {cpp_path} ...")
-    options = parse(cpp_path)
+    options = parse(print_config_text)
     print(f"Extracted {len(options)} options")
 
-    if tab_cpp_path.exists():
-        print(f"Parsing {tab_cpp_path} ...")
-        urls = parse_help_urls(tab_cpp_path)
+    if tab_cpp_text:
+        urls = parse_help_urls(tab_cpp_text)
         print(f"Extracted {len(urls)} help URLs")
         for key, url in urls.items():
             if key in options:
                 options[key]["help_url"] = url
-    else:
-        print(f"Tab.cpp not found at {tab_cpp_path}, skipping help URLs", file=sys.stderr)
 
     OUTPUT.write_text(json.dumps(options, indent=2, ensure_ascii=False) + "\n")
     print(f"Written to {OUTPUT}")
